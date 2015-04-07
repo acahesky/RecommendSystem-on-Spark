@@ -8,16 +8,10 @@ import org.apache.spark.{SparkContext, SparkConf}
 import java.sql.Timestamp
 import org.apache.spark.SparkContext._
 import org.apache.spark.mllib.recommendation.ALS
-import org.apache.spark.mllib.recommendation.MatrixFactorizationModel
-
 import scala.util.Random
 import org.apache.spark.mllib.recommendation.Rating
-case class RatingWithDate(userId: Long,itemId: Long,date: Timestamp) extends serializable
-
-//case class Rating(userId:Long, itemId: Long) extends serializable
-case class CartesianRating(user1Id: Long,user1Count: Long,user2Id: Long,user2Count: Long)
-case class Similarity(user1Id:Long,user2Id:Long,similarity:Double)
-
+case class RatingWithDate(userId: Long,itemId: Long,rating:Double,date: Timestamp) extends serializable
+case class UserData(userId:Long,itemId:Long,behaviorType:Long,userGeohash:String,itemCategory:Long,time:Timestamp) extends serializable
 object ALSTrans {
 
   val kVal = 30
@@ -34,29 +28,28 @@ object ALSTrans {
     val conf = new SparkConf().setAppName("ALSTrans")
     val sc = new SparkContext(conf)
     val sqlContext = new org.apache.spark.sql.hive.HiveContext(sc)
-    @transient val ratingInfo = sqlContext.sql("select user_id,item_id,time from hiccup.tc_train_user").map(x => RatingWithDate(x.getLong(0), x.getLong(1), x(2).asInstanceOf[Timestamp]))
+    @transient val userInfo = sqlContext.sql("select user_id,item_id,behavior_type,user_geohash,item_category,time from hiccup.tc_train_user_filtered").map(x => UserData(x.getLong(0), x.getLong(1),x.getLong(2),x.getString(3),x.getLong(4), x(5).asInstanceOf[Timestamp]))
     @transient val itemInfo = sqlContext.sql("select item_id,time from hiccup.tc_train_item").map(x => x.getLong(0))
+    val dataAdapter = splitRatingbyDate(userInfo, timeDivision)
+    dataAdapter(0).cache()
 
-    val timeDiv = getTimeDiv(ratingInfo.map(x => x.date))
+    val ratingInfo = dataAdapter(0).groupBy(x => (x.userId,x.itemId)).map(x => Rating(x._1._1.toInt,x._1._2.toInt,ratingCalc(x._2)))
+
+    // /val timeDiv = getTimeDiv(ratingInfo.map(x => x.date))
     /**
      * SortedByMovieid
      */
 
-    //1.calculate the top-k familiar user
-    val dataAdapter = splitRatingbyDate(ratingInfo, timeDivision)
-    dataAdapter(0).cache()
-
     val rank = 10
     val numIterations = 20
-    val ratings = dataAdapter(0)
+    val ratings = ratingInfo
 
-    val testSet = dataAdapter(1).map(x => (x.user, List(x.product))).reduceByKey((x, y) => x.union(y))
+    //val testSet = dataAdapter(1).filter(x => x.behaviorType==4).map(x => (x.userId.toInt, List(x.itemId.toInt))).reduceByKey((x, y) => x.union(y))
     val usersProducts = ratings.map { case Rating(user, product, rate) =>
       (user, product)
     }
 
     val model = ALS.train(ratings, rank, numIterations, 0.01)
-    val sss = model.predict(usersProducts)
 
     /**
      *
@@ -76,22 +69,44 @@ object ALSTrans {
     }.mean()
     println("Mean Squared Error = " + MSE)
     */
-    //predictions.saveAsTextFile("hdfs://ns1/hiccup/20150403")
     outputPredictionAnswer(predictions)
-//    val EVA = evaluate(predictions.map(x => (x._1._1, List(x._1._2))).reduceByKey((x, y) => x.union(y)), testSet)
-//    outputParameters(
-//      timeDiv = timeDivision,
-//      beforeTimeDiv = dataAdapter(0).count,
-//      afterTimeDiv = dataAdapter(1).count,
-//      userCount = testSet.count,
-//      movieCount = 0,
-//      ratingCount = 0,
-//      recall = EVA._1,
-//      precision = EVA._2
-//    )
+    //println("testSetCount:"+testSet.count)
+    //predictions.saveAsTextFile("hdfs://ns1/hiccup/20150407")
 
+//      val EVA = evaluate(predictions.map(x => (x.user, List(x.product))).reduceByKey((x, y) => x.union(y)), testSet)
+//      outputParameters(
+//        timeDiv = timeDivision,
+//        beforeTimeDiv = dataAdapter(0).count,
+//        afterTimeDiv = dataAdapter(1).count,
+//        userCount = testSet.count,
+//        movieCount = 0,
+//        ratingCount = 0,
+//        recall = EVA._1,
+//        precision = EVA._2
+//      )
+
+}
+  def calcDValue(s1: Timestamp,s2: Timestamp): Double ={
+    val days = Math.abs(s1.getTime-s2.getTime)/3600000/24
+    1.0/(days.toDouble+1.0)
   }
-
+  def ratingCalc(data:Iterable[UserData]):Double= {
+    val ss = data.toList
+    var rating = 0.0
+    ss.foreach(
+      x => {
+        rating+=calcDValue(timeDivision,x.time)* (x.behaviorType match {
+              case 1 => 0.5
+              case 2 => 1.0
+              case 3 => 5.0
+              case 4 => 1.0
+              case _ => 0.0
+            }
+        )
+      }
+    )
+    rating
+  }
   def hashFunciton(num: Long): Long = {
     num % hashFactor
   }
@@ -128,10 +143,10 @@ object ALSTrans {
     println("precision = " + precision)
   }
 
-  def splitRatingbyDate[T <: RatingWithDate](orgData: RDD[T], timeDiv: Timestamp): Array[RDD[Rating]] = {
+  def splitRatingbyDate[T <: UserData](orgData: RDD[UserData], timeDiv: Timestamp): Array[RDD[UserData]] = {
     Array(
-      orgData.filter(x => x.date.before(timeDiv)).map(x => Rating(x.userId.toInt, x.itemId.toInt, 1.0)),
-      orgData.filter(x => x.date.after(timeDiv)).map(x => Rating(x.userId.toInt, x.itemId.toInt, 1.0))
+      orgData.filter(x => x.time.before(timeDiv)),
+      orgData.filter(x => x.time.after(timeDiv))
     )
   }
 
@@ -147,15 +162,11 @@ object ALSTrans {
     new Timestamp(((maxTime - minTime) / 10 * 8) + minTime)
   }
 
-  def getRandomList(range: Long): List[(Long, Long)] = {
-    val oList = (1L to range).toList
-    val rList = Random.shuffle(oList)
-    rList.zipWithIndex.map(x => (x._2.toLong + 1, x._1))
-  }
+
 
   def outputPredictionAnswer(predictSet: RDD[Rating]) = {
     println("user_id,item_id")
-    predictSet.sortBy(x => -x.rating).distinct.take(50000).toList.foreach(x =>
+    predictSet.distinct.sortBy(x => -x.rating).take(2000).toList.foreach(x =>
       println(x.user + "," + x.product))
   }
 }
