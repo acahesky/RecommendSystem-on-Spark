@@ -19,7 +19,7 @@ object ALSTrans {
   val nodeCapacity = 1000
   val defaultSetSize = 1000000
   val overHot = 10009
-  val timeDivision = Timestamp.valueOf("2015-12-18 0:0:0")
+  val timeDivision = Timestamp.valueOf("2014-12-18 0:0:0")
 
   val minHashVal = 100
   val hashFactor = 1123
@@ -29,22 +29,19 @@ object ALSTrans {
     val sc = new SparkContext(conf)
     val sqlContext = new org.apache.spark.sql.hive.HiveContext(sc)
     @transient val userInfo = sqlContext.sql("select user_id,item_id,behavior_type,user_geohash,item_category,time from hiccup.tc_train_user_filtered").map(x => UserData(x.getLong(0), x.getLong(1),x.getLong(2),x.getString(3),x.getLong(4), x(5).asInstanceOf[Timestamp]))
-    @transient val itemInfo = sqlContext.sql("select item_id,time from hiccup.tc_train_item").map(x => x.getLong(0))
+    //@transient val itemInfo = sqlContext.sql("select item_id,time from hiccup.tc_train_item").map(x => x.getLong(0))
     val dataAdapter = splitRatingbyDate(userInfo, timeDivision)
     dataAdapter(0).cache()
 
     val ratingInfo = dataAdapter(0).groupBy(x => (x.userId,x.itemId)).map(x => Rating(x._1._1.toInt,x._1._2.toInt,ratingCalc(x._2)))
 
-    // /val timeDiv = getTimeDiv(ratingInfo.map(x => x.date))
-    /**
-     * SortedByMovieid
-     */
+
 
     val rank = 10
     val numIterations = 20
     val ratings = ratingInfo
 
-    //val testSet = dataAdapter(1).filter(x => x.behaviorType==4).map(x => (x.userId.toInt, List(x.itemId.toInt))).reduceByKey((x, y) => x.union(y))
+    val testSet = dataAdapter(1).filter(x => x.behaviorType==4).map(x => (x.userId.toInt, List(x.itemId.toInt))).reduceByKey((x, y) => x.union(y))
     val usersProducts = ratings.map { case Rating(user, product, rate) =>
       (user, product)
     }
@@ -69,21 +66,22 @@ object ALSTrans {
     }.mean()
     println("Mean Squared Error = " + MSE)
     */
-    outputPredictionAnswer(predictions)
-    //println("testSetCount:"+testSet.count)
+    //outputPredictionAnswer(predictions)
+    println("testSetCount:"+testSet.count)
     //predictions.saveAsTextFile("hdfs://ns1/hiccup/20150407")
+    val realPre = sc.parallelize(predictions.distinct.sortBy(x => -x.rating).take(20000))
 
-//      val EVA = evaluate(predictions.map(x => (x.user, List(x.product))).reduceByKey((x, y) => x.union(y)), testSet)
-//      outputParameters(
-//        timeDiv = timeDivision,
-//        beforeTimeDiv = dataAdapter(0).count,
-//        afterTimeDiv = dataAdapter(1).count,
-//        userCount = testSet.count,
-//        movieCount = 0,
-//        ratingCount = 0,
-//        recall = EVA._1,
-//        precision = EVA._2
-//      )
+      val EVA = evaluate(realPre.map(x => (x.user, List(x.product))).reduceByKey((x, y) => x.union(y)), testSet)
+      outputParameters(
+        timeDiv = timeDivision,
+        beforeTimeDiv = dataAdapter(0).count,
+        afterTimeDiv = dataAdapter(1).count,
+        userCount = testSet.count,
+        movieCount = 0,
+        ratingCount = 0,
+        recall = EVA._1,
+        precision = EVA._2
+      )
 
 }
   def calcDValue(s1: Timestamp,s2: Timestamp): Double ={
@@ -143,7 +141,7 @@ object ALSTrans {
     println("precision = " + precision)
   }
 
-  def splitRatingbyDate[T <: UserData](orgData: RDD[UserData], timeDiv: Timestamp): Array[RDD[UserData]] = {
+  def splitRatingbyDate(orgData: RDD[UserData], timeDiv: Timestamp): Array[RDD[UserData]] = {
     Array(
       orgData.filter(x => x.time.before(timeDiv)),
       orgData.filter(x => x.time.after(timeDiv))
