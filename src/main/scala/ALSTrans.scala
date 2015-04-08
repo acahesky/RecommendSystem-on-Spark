@@ -12,7 +12,8 @@ import org.apache.spark.{SparkConf, SparkContext}
 case class RatingWithDate(userId: Long,itemId: Long,rating:Double,date: Timestamp) extends serializable
 
 object ALSTrans {
-
+  val predictSum = 2000
+  val timeDecayFactor = 1.0
   val kVal = 30
   val itemVal = 30
   val nodeCapacity = 1000
@@ -39,11 +40,8 @@ object ALSTrans {
     val numIterations = 20
     val ratings = ratingInfo
 
-    val testSet2 = dataAdapter(1).filter(x => x.behaviorType==4)
+    val testSet = dataAdapter(1).filter(x => x.behaviorType==4)//.map(x => (x.userId.toInt, List(x.itemId.toInt))).reduceByKey((x, y) => x.union(y))
 
-    //outputRating(testSet2.map(x => Rating(x.userId.toInt,x.itemId.toInt,0)))
-
-    val testSet = testSet2.map(x => (x.userId.toInt, List(x.itemId.toInt))).reduceByKey((x, y) => x.union(y))
     val usersProducts = ratings.map { case Rating(user, product, rate) =>
       (user, product)
     }
@@ -53,7 +51,7 @@ object ALSTrans {
     /**
      * 下面这段是计算MSE的，暂时用不到
      */
-    val predictions = model.predict(usersProducts)
+
     /*val predictions =
       model.predict(usersProducts).map { case Rating(user, product, rate) =>
         ((user, product), rate)
@@ -67,26 +65,28 @@ object ALSTrans {
     }.mean()
     println("Mean Squared Error = " + MSE)
     */
-    outputRating(predictions)
-    //predictions.saveAsTextFile("hdfs://ns1/hiccup/20150407")
-    val realPre = sc.parallelize(predictions.distinct().sortBy(x => -x.rating).take(20000))
-
-      val EVA = evaluate(realPre.map(x => (x.user, List(x.product))).reduceByKey((x, y) => x.union(y)), testSet)
+    val originPredictions = model.predict(usersProducts).distinct().sortBy(x => -x.rating)
+    for(tPredictSum <- 100 to (2000,100)) {
+      printf("predictSum: "+tPredictSum)
+      val prediction = sc.parallelize(originPredictions.take(tPredictSum))
+      //realPre.map(x => x.user.toString+x.product.toString).saveAsTextFile("hdfs://ns1/hiccup/2015040801")
+      val EVA = evaluate(prediction.map(x => (x.user, x.product)), testSet.map(x => (x.userId.toInt, x.itemId.toInt)).distinct())
       outputParameters(
         timeDiv = timeDivision,
         beforeTimeDiv = dataAdapter(0).count(),
         afterTimeDiv = dataAdapter(1).count(),
         userCount = testSet.count(),
-        movieCount = 0,
+        itemCount = 0,
         ratingCount = 0,
         recall = EVA._1,
         precision = EVA._2
       )
-
+      //outputRating(prediction)
+    }
 }
   def calcDValue(s1: Timestamp,s2: Timestamp): Double ={
-    val days = Math.abs(s1.getTime-s2.getTime)/3600000/24
-    1.0/(days.toDouble+1.0)
+    val days = Math.abs(s1.getTime-s2.getTime).toDouble/3600000.0/24.0
+    1.0/(timeDecayFactor * days.toDouble+1.0)
   }
   def ratingCalc(data:Iterable[UserData]):Double= {
     val ss = data.toList
@@ -109,42 +109,31 @@ object ALSTrans {
     num % hashFactor
   }
 
-  def evaluate[T <: (Int, List[Int])](predictSet: RDD[(Int, List[Int])], testSet: RDD[(Int, List[Int])]): (Double, Double) = {
-    val joined = predictSet.join(testSet)
-    //println("joinedSize:" + joined.count())
-    val ans = joined.map(
-      x => {
-        (x._2._1.intersect(x._2._2).size,
-          x._2._1.size,
-          x._2._2.size
-          )
-      }
-    ).reduce(
-        (x, y) => (x._1 + y._1, x._2 + y._2, x._3 + y._3))
-    val interNum = ans._1.toDouble
-    val unionNumT = ans._2.toDouble
-    val unionNumR = ans._3.toDouble
-    (interNum / unionNumT, interNum / unionNumR)
+  def evaluate(predictSet: RDD[(Int, Int)], testSet: RDD[(Int, Int)]): (Double, Double) = {
+    val interSet = predictSet.intersection(testSet)
+
+    val interNum = interSet.count().toDouble
+    val tS = testSet.count().toDouble
+    val rS = predictSet.count().toDouble
+    (interNum / tS, interNum / rS)
   }
 
-  def outputParameters(timeDiv: Timestamp, beforeTimeDiv: Long, afterTimeDiv: Long, userCount: Long, movieCount: Long, ratingCount: Long, recall: Double, precision: Double): Unit = {
-    println("kVal = " + kVal)
-    println("nodeCapacity = " + nodeCapacity)
-    println("defaultSetSize = " + defaultSetSize)
-    println("timeDiv = " + timeDiv)
-    println("beforeTimeDiv =" + beforeTimeDiv)
-    println("afterTimeDiv = " + afterTimeDiv)
-    println("userCount = " + userCount)
-    println("movieCount = " + movieCount)
-    println("ratingCount = " + ratingCount)
+  def outputParameters(timeDiv: Timestamp, beforeTimeDiv: Long, afterTimeDiv: Long, userCount: Long, itemCount: Long, ratingCount: Long, recall: Double, precision: Double): Unit = {
+//    println("timeDiv = " + timeDiv)
+//    println("beforeTimeDiv =" + beforeTimeDiv)
+//    println("afterTimeDiv = " + afterTimeDiv)
+//    println("userCount = " + userCount)
+//    println("itemCount = " + itemCount)
+//    println("ratingCount = " + ratingCount)
     println("recall = " + recall)
     println("precision = " + precision)
+    println("F1 = " + 2*recall*precision/(recall+precision))
   }
 
   def splitRatingbyDate(orgData: RDD[UserData], timeDiv: Timestamp): Array[RDD[UserData]] = {
     Array(
       orgData.filter(x => x.time.before(timeDiv)),
-      orgData.filter(x => x.time.after(timeDiv))
+      orgData.filter(x => x.time.getTime>= timeDiv.getTime)
     )
   }
 
@@ -164,7 +153,7 @@ object ALSTrans {
 
   def outputRating(predictSet: RDD[Rating]) = {
     println("user_id,item_id")
-    predictSet.distinct().sortBy(x => -x.rating).take(2000).toList.foreach(x =>
+    predictSet.collect().toList.foreach(x =>
       println(x.user + "," + x.product))
   }
 }
