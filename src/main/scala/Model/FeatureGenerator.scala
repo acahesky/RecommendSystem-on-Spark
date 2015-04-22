@@ -14,51 +14,58 @@ package model
 
   object FeatureGenerator {
 
-
     val timeDecayFactor = 4.0
     val buyThreshold = 1
+    val threeDays = Timestamp.valueOf("2014-11-4 0:0:0").getTime-Timestamp.valueOf("2014-11-1 0:0:0").getTime
+    val uiFeatureRegular = Array(1,3,7,30)
+    val itemFeatureRegular = Array(1,7,30)
+    val userFeatureRegular = Array(1,7,30)
+    val alsRank = 10
+    val alsNumIterations = 20
 
     def getFeature(userDataRDD:RDD[UIData],endingTime:Timestamp) = {
 
-      val uiList = userDataRDD.groupBy(x => (x.userId,x.itemId))
-      val uiInfo = uiList.map(x => Rating(x._1._1.toInt,x._1._2.toInt,ratingCalc(x._2,endingTime)))
-
-      val userFeature = getUserFeature(userDataRDD)
-      val outUI = userDataRDD
-        .filter(x => x.behaviorType ==4)
-        .map(x => ((x.userId,x.itemId),1))
-        .reduceByKey((x,y) => x+y)
-        .filter(x => x._2 <= buyThreshold)
-        .map(x => (x._1._1.toInt,x._1._2.toInt))
-        .collect()
-
-      val rank = 10
-      val numIterations = 20
-      val ratings = uiInfo
+      val uiList = userDataRDD.groupBy(x => UI(x.userId,x.itemId))
 
 
-      val usersProducts = ratings.map { case Rating(user, product, rate) =>
-        (user, product)
-      }
-
-      val model = ALS.train(ratings,rank,numIterations)
+      val userFeature = getUserFeature(userDataRDD,endingTime)
+      val itemFeature = getItemFeature(userDataRDD,endingTime)
 
 
-      val originPredictions = model.predict(usersProducts)
-        .distinct()
-        .filter( x => !outUI.contains((x.user,x.product)))
+      //remove cf
+      val uiInfo = uiList.map(x => Rating(x._1.user,x._1.item,ratingCalc(x._2,endingTime)))
+      val alsRecommendList = getRating(uiInfo)
+      val withRating: RDD[(UI, (Iterable[UIData], Double))] =uiList
+        .join(alsRecommendList)
+        .map(x => (x._1,x._2))
+//      val withRating = userDataRDD.groupBy(x => UI(x.userId,x.itemId)).map(x => (x._1,(x._2,0.0)))
+      val uiFeature = getUIFeature(withRating,endingTime)
 
-      val withRating =uiList
-        .join(originPredictions.map(x => ((x.user,x.product),x.rating)))
-        .map(x => UISet(UI(x._1._1,x._1._2),UIFeature(x._2._2),x._2._1.toList))
+      val uiFeatureF = mergeFeature(userFeature,itemFeature,uiFeature)
 
-      val userInfo = withRating
-        .groupBy(x => x.ui.user)
-        .join(userFeature)
-        .map(x => UserData(x._1,x._2._2,x._2._1.toList))
-      userInfo
+      //之后可以继续优化  随机split的时候可以选择相同user
+      uiFeatureF
 
   }
+    def mergeFeature(userFeature:RDD[(Int,UserFeatures)],itemFeatures:RDD[(Int,ItemFeatures)],uiFeatures:RDD[(UI,UIFeatures)])={
+      val s = uiFeatures.groupBy(x => x._1.user).join(userFeature).flatMap(
+        x =>
+          x._2._1
+            .map(
+              y => UISet(y._1,x._2._2,ItemFeatures.zeroVal,y._2)))
+      s.groupBy(x => x.ui.item).join(itemFeatures).flatMap(
+        x =>
+          x._2._1.map(
+            y =>
+              y.setItemFeature(x._2._2)
+          )
+      )
+    }
+
+    def calcDays(s1: Timestamp,s2: Timestamp): Double ={
+       Math.abs(s1.getTime-s2.getTime).toDouble/3600000.0/24.0
+    }
+
 
     def calcDValue(s1: Timestamp,s2: Timestamp): Double ={
       val days = Math.abs(s1.getTime-s2.getTime).toDouble/3600000.0/24.0
@@ -67,6 +74,7 @@ package model
 
     def ratingCalc(data:Iterable[UIData],endingTime:Timestamp):Double= {
       val ss = data.toList
+
       val bb = ss.groupBy(x => x.behaviorType).map(x => (x._1,(if (x._2.length> 10) 10 else x._2.length).toDouble)).toMap
 
       var rating = 0.0
@@ -86,34 +94,276 @@ package model
 //        rating = 0.0
       rating
     }
+    def getItemFeature(rdd:RDD[UIData],endingTime: Timestamp) = {
+      val itemList = rdd.groupBy(x => x.itemId)
+      itemList.map(
+        uiDatas => {
+          val itemFeaturePerDate = itemFeatureRegular.map(
+            daysLen => {
+              val uiListF =
+                uiDatas._2.filter(x => calcDays(x.time,endingTime) <= daysLen.toDouble)
+              val user = uiListF.groupBy(x => x.userId)
+              val userSum = user.size
+              val purchase = uiListF.filter(x => x.behaviorType == 4)
+              val purchaseSum = purchase.size
+              val purchaseUsers = purchase.groupBy(x => x.userId).size
+              val visit = uiListF.filter(x => x.behaviorType == 1)
+              val visitSum = visit.size
+              val visitUsers = visit.groupBy(x => x.userId).size
+              val collect = uiListF.filter(x => x.behaviorType == 2)
+              val collectSum = collect.size
+              val collectUsers = collect.groupBy(x => x.userId).size
+              val shoppingcart = uiListF.filter(x => x.behaviorType == 3)
+              val shoppingcartSum = shoppingcart.size
+              val shoppingcartUsers = shoppingcart.groupBy(x => x.userId).size
+              val cV = purchaseSum.toDouble/(visitSum+collectSum+shoppingcartSum).toDouble
+              val userCV = purchaseUsers.toDouble/(visitUsers+collectUsers+shoppingcartUsers).toDouble
+              val regularCustomerRate =
+                purchase
+                  .groupBy(x => x.userId)
+                  .count(
+                    x => {
+                      val timeList = x._2.map(
+                        x => x.time.getTime
+                      )
+                      if (timeList.max - timeList.min > threeDays/3)
+                        true
+                      else
+                        false
+                    }
+                  ).toDouble / purchaseUsers.toDouble
+              val jumpOutRate = user.count(x => x._2.size == 1).toDouble / userSum
+              ItemFeaturePerDate(
+                users = userSum,
+                purchaseSum = purchaseSum,
+                purchaseUsers = purchaseUsers,
+                visitSum = visitSum,
+                visitUsers = visitUsers,
+                collectSum = collectSum,
+                collectUsers = collectUsers,
+                shoppingcartSum = shoppingcartSum,
+                shoppingcartUsers = shoppingcartUsers,
+                cV =cV,
+                userCV = userCV,
+                regularCustomerRate = regularCustomerRate,
+                jumpOutRate = jumpOutRate
+              )
+            }
+          )
+          (uiDatas._1,ItemFeatures(itemFeaturePerDate))
+        }
+      )
+    }
+    def getUIFeature(rdd: RDD[(UI,(Iterable[UIData],Double))],endingTime:Timestamp) ={
+      val uiFeatureWithoutUserFeature = rdd.map(
+        x => {
+          val uiList = x._2._1.toList
+          val outTimeList = uiList.map(x => x.time.getTime)
+          val lastAccess = calcDays(new Timestamp(outTimeList.max),endingTime)
+          val firstAccess = calcDays(new Timestamp(outTimeList.max),endingTime)
+          val tDaysLen = Math.abs(lastAccess-firstAccess)
+          val uiFeatures = uiFeatureRegular.map(
+            daysLen => {
+
+              val userList = uiList.filter(x => calcDays(x.time, endingTime) <= daysLen.toDouble)
+
+              val visitSum = userList.count(x => x.behaviorType == 1)
+              val collectSum = userList.count(x => x.behaviorType == 2)
+              val shoppingcartSum = userList.count(x => x.behaviorType == 3)
+              val purchaseSum = userList.count(x => x.behaviorType == 4)
+              val cv = purchaseSum.toDouble / (visitSum + collectSum + shoppingcartSum).toDouble
+              val collectCV = purchaseSum.toDouble / collectSum.toDouble
+              val shoppingcartCV = purchaseSum.toDouble / shoppingcartSum.toDouble
+
+              val timeList = userList.map(x => x.time)
+              val timeNumList = timeList.map(x => x.getTime)
+              val daysInterval =
+                if(timeNumList.size !=0)
+                  calcDays(new Timestamp(timeNumList.max),new Timestamp(timeNumList.min))
+                else
+                  0
+              val activeDay = timeList.map(x => (x.getMonth + 1, x.getDate)).toList.distinct.size
+              val activeRate = activeDay.toDouble / daysInterval.toDouble
+
+              val purchaseDay = userList.filter(x => x.behaviorType == 4).map(x => (x.time.getMonth + 1, x.time.getDate)).toList.distinct.size
+              val visitDay = userList.filter(x => x.behaviorType == 1).map(x => (x.time.getMonth + 1, x.time.getDate)).toList.distinct.size
+              val collectDay = userList.filter(x => x.behaviorType == 2).map(x => (x.time.getMonth + 1, x.time.getDate)).toList.distinct.size
+              val shoppingcartDay = userList.filter(x => x.behaviorType == 3).map(x => (x.time.getMonth + 1, x.time.getDate)).toList.distinct.size
+
+              val visitRate = visitDay.toDouble / daysInterval.toDouble
+              val collectRate = collectDay.toDouble / daysInterval.toDouble
+              val shoppingcartRate = shoppingcartDay.toDouble / daysInterval.toDouble
+              val purchaseRate = purchaseDay.toDouble / daysInterval.toDouble
+              UIFeaturePerDate(
+                visitSum = visitSum,
+                collectSum = collectSum,
+                shoppingcartSum = shoppingcartSum,
+                purchaseSum = purchaseSum,
+                cv = cv,
+                collectCV = collectCV,
+                shoppingcartCV = shoppingcartCV,
+                visitDay = visitDay,
+                collectDay = collectDay,
+                shoppingcartDay = shoppingcartDay,
+                purchaseDay = purchaseDay,
+                visitRate = visitRate,
+                collectRate = collectRate,
+                shoppingcartRate = shoppingcartRate,
+                purchaseRate = purchaseRate,
+                activeDay = activeDay,
+                activeRate = activeRate
+              )
+            }
+          )
+            (
+              x._1,
+              UIFeatures(
+                rating = x._2._2,
+                firstAccess = firstAccess,
+                lastAccess = lastAccess,
+                daysLen = tDaysLen,
+                uiFeatures = uiFeatures
+              )
+              )
+        }
+      )
+      // join the UserFeature
+      uiFeatureWithoutUserFeature
+//        .map(x => (x.getUI().user,x))
+//        .join(userFeature)
+//        .map(
+//          x =>
+//            x._2._1.setUserFeature(x._2._2)
+//        )
+    }
 
 
-
-
-    def getUserFeature(rdd: RDD[UIData])= {
+    def getUserFeature(rdd: RDD[UIData],endingTime:Timestamp)= {
       rdd.groupBy(x => x.userId)
         .map(
-          x => {
-            val userList = x._2
-            val browseSum = userList.count(x => x.behaviorType == 1)
-            val collectSum = userList.count(x => x.behaviorType == 2)
-            val shoppingcartSum = userList.count(x => x.behaviorType == 3)
-            val purchaseSum = userList.count(x => x.behaviorType == 4)
-            val conversion1 = browseSum.toDouble/purchaseSum.toDouble
-            val conversion2 = collectSum.toDouble/purchaseSum.toDouble
-            val conversion3 = shoppingcartSum.toDouble/purchaseSum.toDouble
-            val conversion = (browseSum+collectSum+shoppingcartSum).toDouble/purchaseSum.toDouble
-            (
-              x._1,UserFeature(
-              c = conversion,
-              c1 = conversion1,
-              c2 = conversion2,
-              c3 = conversion3,
-              shoppingcartSum = shoppingcartSum
+          uiDatas => {
+
+            val outTimeList = uiDatas._2.map(x => x.time.getTime)
+            val firstLogin = outTimeList.min
+            val lastLogin = outTimeList.max
+            val tDaysLen = calcDays(new Timestamp(firstLogin),new Timestamp(lastLogin))
+            val userFeatures = userFeatureRegular.map(
+              daysLen =>{
+                val userList =
+                  uiDatas._2.filter(
+                    x =>
+                      calcDays(x.time,endingTime) <= daysLen.toDouble
+                  )
+
+                val visitSum = userList.count(x => x.behaviorType == 1)
+                val collectSum = userList.count(x => x.behaviorType == 2)
+                val shoppingcartSum = userList.count(x => x.behaviorType == 3)
+                val purchaseSum = userList.count(x => x.behaviorType == 4)
+                val cv = purchaseSum.toDouble/(visitSum+collectSum+shoppingcartSum).toDouble
+                val collectCV = purchaseSum.toDouble/collectSum.toDouble
+                val shoppingcartCV = purchaseSum.toDouble/shoppingcartSum.toDouble
+
+                val timeList = userList.map(x => x.time)
+                val timeNumList = timeList.map(x => x.getTime)
+                val daysInterval =
+                  if(timeNumList.size !=0)
+                    calcDays(new Timestamp(timeNumList.max),new Timestamp(timeNumList.min))
+                  else
+                    1
+                val activeDay = timeList.map(x => (x.getMonth+1,x.getDate)).toList.distinct.size
+                val activeRate = activeDay.toDouble/daysInterval.toDouble
+
+                val purchaseDay = userList.filter(x => x.behaviorType == 4).map(x => (x.time.getMonth+1,x.time.getDate)).toList.distinct.size
+                val visitDay = userList.filter(x => x.behaviorType == 1).map(x => (x.time.getMonth+1,x.time.getDate)).toList.distinct.size
+                val collectDay = userList.filter(x => x.behaviorType == 2).map(x => (x.time.getMonth+1,x.time.getDate)).toList.distinct.size
+                val shoppingcartDay = userList.filter(x => x.behaviorType == 3).map(x => (x.time.getMonth+1,x.time.getDate)).toList.distinct.size
+
+                val visitRate =visitDay.toDouble/daysInterval.toDouble
+                val collectRate = collectDay.toDouble/daysInterval.toDouble
+                val shoppingcartRate = shoppingcartDay.toDouble/daysInterval.toDouble
+                val purchaseRate = purchaseDay.toDouble/daysInterval.toDouble
+                UserFeaturePerDate(
+                  visitSum = visitSum,
+                  collectSum = collectSum,
+                shoppingcartSum=shoppingcartSum,
+                purchaseSum = purchaseSum,
+                cv = cv,
+                collectCV = collectCV,
+                shoppingcartCV = shoppingcartCV,
+                visitDay = visitDay,
+                collectDay = collectDay,
+                shoppingcartDay = shoppingcartDay,
+                purchaseDay = purchaseDay,
+                visitRate = visitRate,
+                collectRate = collectRate,
+                shoppingcartRate = shoppingcartRate,
+                purchaseRate = purchaseRate,
+                activeDay = activeDay,
+                activeRate = activeRate
+                )
+              }
             )
-              )
+            (uiDatas._1,UserFeatures(
+              firstLogin = firstLogin,
+              lastLogin = lastLogin,
+              daysLen = tDaysLen,
+              userFeatures = userFeatures
+            ))
           }
         )
   }
+    def getDTFeature(rdd:RDD[UISet],labelSet:Array[UI]) = {
+      rdd.map(x => {
+        val label = if(labelSet.contains(x.getUI)) 1 else 0
+        (x.ui,x.toDTFeature(label))
+      })
+    }
+    def getDTFeatureWithUISet(rdd:RDD[UISet],labelSet:Array[UI]) = {
+      rdd.map(x => {
+        val label = if(labelSet.contains(x.getUI)) 1 else 0
+        (x,x.toDTFeature(label))
+      })
+    }
+    def getUserDTFeatureWithUISet(rdd:RDD[(Int,UserFeatures)],labelSet:Array[Int]) ={
+      rdd.map(x => {
+        val label = if(labelSet.contains(x._1)) 1 else 0
+        (x._1,(label,x._2.toDense))
+      })
+    }
+//    def getDTFeature(rdd:RDD[UserData],labelSet:Array[UI])={
+//      rdd.flatMap(x => {
+//        // 融合UserFeature,UIFeature,ItemFeature
+//
+//        x.uiSet.map(
+//          y => {
+//          val label = if (labelSet.contains(y.ui)) 1 else 0
+//          (
+//            y.ui,
+//            DTFeature(
+//            x.userFeature,
+//            y.uiFeature,
+//            y.itemFeature,
+//            label
+//          ))
+//        })
+//      })
+//    }
+    def getRating(uiInfo:RDD[Rating])={
 
+      val usersProducts = uiInfo.map { case Rating(user, product, rate) =>
+        (user, product)
+      }
+
+      val model = ALS.train(uiInfo,alsRank,alsNumIterations)
+      model
+        .predict(usersProducts)
+        .map(
+          x =>
+            (
+              UI(x.user,x.product),
+              x.rating
+              )
+      )
+
+    }
   }

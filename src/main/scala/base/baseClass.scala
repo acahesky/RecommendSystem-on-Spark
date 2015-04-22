@@ -36,9 +36,14 @@ case class UserFeatures(firstLogin:Long,lastLogin:Long,daysLen:Double,
   def toArray = {
     Array(firstLogin.toDouble,lastLogin.toDouble,daysLen).union(userFeatures.flatMap(x => x.toArray))
   }
+  def toDense = {
+    Vectors.dense(
+      this.toArray
+        .map(x => if(x.isInfinity||x.isNaN||x.isInfinite) 0 else x)
+    )
+  }
 }
 object UserFeatures{
-
   val zeroVal = Array[UserFeaturePerDate]()
 }
 
@@ -107,6 +112,12 @@ case class DTFeature(u:UserFeatures, i:ItemFeatures,ui:UIFeatures, label:Long){
     .union(i.toArray)
     .union(ui.toArray)
     .map(x => if(x.isInfinity||x.isNaN||x.isInfinite) 0 else x)
+    )
+  }
+  def toUserFeaturesDense = {
+    Vectors.dense(
+      u.toArray
+        .map(x => if(x.isInfinity||x.isNaN||x.isInfinite) 0 else x)
     )
   }
 

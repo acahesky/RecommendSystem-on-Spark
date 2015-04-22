@@ -9,11 +9,12 @@ import java.sql.Timestamp
 object MC {
 
   val testMode = true
-
+  val parameter = ""
   var orgPath = "hdfs://ns1/hiccup/"
-
+  val mode = "withoutCF/"
+//  val mode = ""
   def main(args: Array[String]) {
-
+    orgPath += mode
     if(testMode){
       orgPath += "testFeature"
     }
@@ -37,18 +38,21 @@ object MC {
    val testData = sc.objectFile[(UISet,LabeledPoint)](s"$orgPath/testSet")
    val itemList = sc.objectFile[Int](s"$orgPath/itemList")
    val resultUI = sc.objectFile[UI](s"$orgPath/resultUI")
-   val resultUIC = resultUI.collect
+   val resultUIC = resultUI.collect()
    val predictSet = DT.getDTResult(positive,negative,testData)
-   val fi = RulesFilter.filteredByUIFeatureSet(predictSet, itemList.collect)
+   val fi = RulesFilter.filteredByUIFeatureSet(predictSet, itemList.collect())
 
     if(testMode) {
       println("predictSet: " + predictSet.count)
 
       println("filtered")
-      val eva = fi.foreach(x => {
+      val eva = fi.map(x => {
         println("takeSum: " + x.size)
         Evaluator.run(x, resultUIC)
       })
+      println("best recall:\n"+eva.map(x =>x._3).max)
+      println("best f1:")
+      println(eva.sortBy(x => -x._5).apply(0))
     }
     else
     Evaluator.outputRating(fi(5))

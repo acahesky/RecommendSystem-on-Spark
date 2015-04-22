@@ -79,24 +79,24 @@ object PageRank extends Logging {
   def run[VD: ClassTag, ED: ClassTag](
                                        graph: Graph[VD, ED], numIter: Int, resetProb: Double = 0.15): Graph[Double, Double] =
   {
-    // Initialize the PageRank graph with each edge attribute having
-    // weight 1/outDegree and each vertex with attribute 1.0.
-    var rankGraph: Graph[Double, Double] = graph
-      // Associate the degree with each vertex
-      .outerJoinVertices(graph.outDegrees) { (vid, vdata, deg) => deg.getOrElse(0) }
-      // Set the weight on the edges based on the degree
-      .mapTriplets( e => 1.0 / e.srcAttr, TripletFields.Src )
-      // Set the vertex attributes to the initial pagerank values
-      .mapVertices( (id, attr) => resetProb )
+      // Initialize the PageRank graph with each edge attribute having
+      // weight 1/outDegree and each vertex with attribute 1.0.
+      var rankGraph: Graph[Double, Double] = graph
+        // Associate the degree with each vertex
+        .outerJoinVertices(graph.outDegrees) {   (vid, vdata, deg) => deg.getOrElse(0) }
+        // Set the weight on the edges based on the degree
+        .mapTriplets( e => 1.0 / e.srcAttr, TripletFields.Src )
+        // Set the vertex attributes to the initial pagerank values
+        .mapVertices( (id, attr) => resetProb )
 
-    var iteration = 0
-    var prevRankGraph: Graph[Double, Double] = null
-    while (iteration < numIter) {
-      rankGraph.cache()
+      var iteration = 0
+      var prevRankGraph: Graph[Double, Double] = null
+      while (iteration < numIter) {
+        rankGraph.cache()
 
-      // Compute the outgoing rank contributions of each vertex, perform local preaggregation, and
-      // do the final aggregation at the receiving vertices. Requires a shuffle for aggregation.
-      val rankUpdates = rankGraph.aggregateMessages[Double](
+        // Compute the outgoing rank contributions of each vertex, perform local preaggregation, and
+        // do the final aggregation at the receiving vertices. Requires a shuffle for aggregation.
+        val rankUpdates = rankGraph.aggregateMessages[Double](
         ctx => ctx.sendToDst(ctx.srcAttr * ctx.attr), _ + _, TripletFields.Src)
 
       // Apply the final rank updates to get the new ranks, using join to preserve ranks of vertices

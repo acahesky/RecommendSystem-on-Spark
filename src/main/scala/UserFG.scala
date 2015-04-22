@@ -1,6 +1,8 @@
 /**
+ * Created by lenovo on 2015/4/21.
+ */
+/**
  * Created by lenovo on 2015/4/20.
- * Feature
  */
 
 import java.sql.Timestamp
@@ -9,14 +11,13 @@ import base._
 import model._
 import org.apache.spark.rdd.RDD
 import org.apache.spark.{SparkConf, SparkContext}
-case class DateSet(startTime:Timestamp,endTime:Timestamp,preTime:Timestamp)
-object FG {
+object UserFG {
   /**
    * 28号 周五
    */
   val testMode = true
 
-  var repeatDays = 0
+  var repeatDays = 10
   val startDate = DT.getDate(11,18)
   val endDate = DT.getDate(11,27)
 
@@ -26,8 +27,7 @@ object FG {
   var t1 = Timestamp.valueOf("2014-12-3 0:0:0")
   var t2 = Timestamp.valueOf("2014-12-4 0:0:0")
   var orgPath = "hdfs://ns1/hiccup/"
-  val mode = ""
-//  val mode = "withoutCF/"
+  var mode = "user/"
   var ft0 = Timestamp.valueOf("2014-12-1 0:0:0")
   var ft1 = Timestamp.valueOf("2014-12-18 0:0:0")
   var ft2 = Timestamp.valueOf("2014-12-19 0:0:0")
@@ -57,7 +57,7 @@ object FG {
     val trainingSet = DataSpliter.splitDatabyMultiDate(userInfo,Array((t0,t2))).apply(0)
 
     val resultSet = DataSpliter.splitDatabyMultiDate(userInfo,Array((ft1,ft2))).apply(0).filter(x => x.behaviorType == 4)
-    val resultUI = resultSet.map(x => UI(x.userId,x.itemId)).filter(x => tItemList.contains(x.item))
+    val resultUI = resultSet.map(x => x.userId)
 
     val trainingData = (0 to repeatDays).map(
       x =>{
@@ -67,16 +67,17 @@ object FG {
         println(startTime)
         println(endTime)
         println(preTime)
-        DT.getFullLabeledPoint(trainingSet,startTime,endTime,preTime)
+        DT.getUserLabledPoint(trainingSet,startTime,endTime,preTime)
       }
     ).reduce((x,y) => x.union(y))
-    val trainingSetFiltered = userInfo.groupBy(x =>x.itemId).join(itemList.map(x => (x, 0))).flatMap( x => x._2._1)
+    //val trainingSetFiltered = userInfo.groupBy(x =>x.itemId).join(itemList.map(x => (x, 0))).flatMap( x => x._2._1)
     //val trainingSetFiltered = trainingSet.filter(x => tItemList.contains(x.itemId))
-///不能广播不知道是什么bug
+    val trainingSetFiltered = userInfo
+    ///不能广播不知道是什么bug
 
     val negative = trainingData.filter(x => x.label == 0)
     val positive = trainingData.filter(x => x.label == 1)
-    val testData = DT.getFullLabeledPointWithUI(trainingSetFiltered,ft0,ft1)
+    val testData = DT.getUserLabledPointWithUI(trainingSetFiltered,ft0,ft1,ft2)
     println(negative.count())
     println(positive.count())
     println(testData.count())
